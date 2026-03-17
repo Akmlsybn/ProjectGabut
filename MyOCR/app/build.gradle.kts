@@ -1,6 +1,15 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+}
+
+val rahasiaProperties = Properties()
+val fileRahasia = rootProject.file("local.properties")
+if (fileRahasia.exists()) {
+    rahasiaProperties.load(FileInputStream(fileRahasia))
 }
 
 android {
@@ -17,8 +26,11 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // 2. TAMBAHKAN DI SINI (Di dalam defaultConfig)
+        val apiUrl = rahasiaProperties.getProperty("WEB_API_URL") ?: "URL_KOSONG"
+        buildConfigField("String", "WEB_API_URL", "\"$apiUrl\"") // <--- Rahasianya ada di tanda \" ini!
     }
 
     buildTypes {
@@ -36,6 +48,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

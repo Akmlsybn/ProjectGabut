@@ -43,6 +43,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.util.concurrent.TimeUnit
+import okhttp3.FormBody
+import com.example.myocr.BuildConfig
 
 class FloatingService : Service() {
 
@@ -58,8 +60,9 @@ class FloatingService : Service() {
 
     private var isSedangMemproses = false
 
-    // --- FITUR DUAL MODE ---
-    private var isModeOffline = false // false = Ollama (Gemma), true = Google (Offline)
+    // --- FITUR TRIPLE MODE ---
+    // 0 = AI (Laptop), 1 = OFF (Google ML Kit), 2 = WEB (API Ninja)
+    private var currentMode = 0
     private var penerjemahGoogle: Translator? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -68,12 +71,11 @@ class FloatingService : Service() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         buatUIMelayang()
-        siapkanPenerjemahGoogle() // Siapkan kamus offline di background
+        siapkanPenerjemahGoogle()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         buatNotifikasiForeground()
-
         try {
             val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
             val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -96,12 +98,11 @@ class FloatingService : Service() {
                 }, Handler(Looper.getMainLooper()))
 
                 inisialisasiVirtualDisplay()
-                Toast.makeText(this, "Penerjemah Siap! Tap T untuk terjemahkan.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Penerjemah Siap!", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
             Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
         }
-
         return START_NOT_STICKY
     }
 
@@ -110,12 +111,10 @@ class FloatingService : Service() {
             .setSourceLanguage(TranslateLanguage.KOREAN)
             .setTargetLanguage(TranslateLanguage.INDONESIAN)
             .build()
-
         penerjemahGoogle = Translation.getClient(options)
         val conditions = DownloadConditions.Builder().build()
-
         penerjemahGoogle?.downloadModelIfNeeded(conditions)?.addOnSuccessListener {
-            Log.d("Translator", "Kamus offline siap digunakan")
+            Log.d("Translator", "Kamus offline siap")
         }
     }
 
@@ -128,35 +127,26 @@ class FloatingService : Service() {
         val density = metrics.densityDpi
 
         imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-
         virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ManhwaTranslator",
-            screenWidth, screenHeight, density,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface,
-            null, null
+            "ManhwaTranslator", screenWidth, screenHeight, density,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader?.surface, null, null
         )
     }
 
     @SuppressLint("SetTextI18n")
     private fun buatUIMelayang() {
-        // Kontainer agar tombol bisa atas-bawah
         floatingLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
 
-        // 1. TOMBOL "T" (ATAS)
         val floatingButton = Button(this).apply {
             text = "T"
             setBackgroundColor(android.graphics.Color.parseColor("#FF6200EE"))
             setTextColor(android.graphics.Color.WHITE)
 
-            // Klik Biasa = Menerjemahkan
             setOnClickListener {
                 if (!isSedangMemproses) mulaiProsesTerjemahan()
             }
-
-            // Tahan (Long Press) = Mematikan aplikasi
             setOnLongClickListener {
                 Toast.makeText(context, "Penerjemah Dimatikan. Sampai Jumpa!", Toast.LENGTH_SHORT).show()
                 stopSelf()
@@ -164,21 +154,28 @@ class FloatingService : Service() {
             }
         }
 
-        // 2. TOMBOL GANTI MODE (BAWAH)
+        // TOMBOL TRIPLE MODE
         val modeButton = Button(this).apply {
-            text = "AI" // Default pakai laptop
+            text = "AI"
             setBackgroundColor(android.graphics.Color.parseColor("#03DAC5"))
             setTextColor(android.graphics.Color.BLACK)
             textSize = 10f
 
             setOnClickListener {
-                isModeOffline = !isModeOffline
-                if (isModeOffline) {
-                    text = "OFF"
-                    Toast.makeText(context, "Mode: Offline (Google ML Kit)", Toast.LENGTH_SHORT).show()
-                } else {
-                    text = "AI"
-                    Toast.makeText(context, "Mode: Laptop (Gemma AI)", Toast.LENGTH_SHORT).show()
+                currentMode = (currentMode + 1) % 3 // Siklus: 0 -> 1 -> 2 -> 0
+                when (currentMode) {
+                    0 -> {
+                        text = "AI"
+                        Toast.makeText(context, "Mode: Laptop (Gemma AI)", Toast.LENGTH_SHORT).show()
+                    }
+                    1 -> {
+                        text = "OFF"
+                        Toast.makeText(context, "Mode: Offline (Kamus HP)", Toast.LENGTH_SHORT).show()
+                    }
+                    2 -> {
+                        text = "WEB"
+                        Toast.makeText(context, "Mode: Ninja (Google API)", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         }
@@ -187,15 +184,12 @@ class FloatingService : Service() {
         floatingLayout.addView(modeButton)
 
         val btnParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 0
-            y = 300
+            x = 0; y = 300
         }
         windowManager.addView(floatingLayout, btnParams)
 
@@ -210,11 +204,9 @@ class FloatingService : Service() {
         }
 
         val textParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.BOTTOM }
         windowManager.addView(textBubble, textParams)
     }
@@ -259,7 +251,7 @@ class FloatingService : Service() {
                     val retryImage = imageReader?.acquireLatestImage()
                     if (retryImage != null) {
                         val planes = retryImage.planes
-                        val buffer: ByteBuffer = planes[0].buffer
+                        val buffer = planes[0].buffer
                         val pixelStride = planes[0].pixelStride
                         val rowStride = planes[0].rowStride
                         val bitmapWidth = screenWidth + (rowStride - pixelStride * screenWidth) / pixelStride
@@ -289,7 +281,6 @@ class FloatingService : Service() {
         floatingLayout.visibility = View.VISIBLE
     }
 
-    // === MATA: GOOGLE ML KIT DENGAN FILTER SAMPAH ===
     private fun bacaTeksDariBitmap(bitmap: Bitmap) {
         try {
             val inputImage = InputImage.fromBitmap(bitmap, 0)
@@ -298,17 +289,23 @@ class FloatingService : Service() {
             recognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
                     bitmap.recycle()
-                    // Bersihkan teks sebelum dikirim!
                     val teksBersih = bersihkanTeksOcr(visionText.text)
 
                     if (teksBersih.isNotBlank()) {
-                        // CEK MODE SAAT INI
-                        if (isModeOffline) {
-                            textBubble.text = "Menerjemahkan Offline..."
-                            terjemahkanDenganGoogle(teksBersih)
-                        } else {
-                            textBubble.text = "Menerjemahkan dengan AI..."
-                            kirimKeLaptop(teksBersih)
+                        // CABANG TRIPLE MODE
+                        when (currentMode) {
+                            0 -> {
+                                textBubble.text = "Menerjemahkan dengan AI..."
+                                kirimKeLaptop(teksBersih)
+                            }
+                            1 -> {
+                                textBubble.text = "Menerjemahkan Offline..."
+                                terjemahkanDenganGoogle(teksBersih)
+                            }
+                            2 -> {
+                                textBubble.text = "Menerjemahkan Online..."
+                                terjemahkanDenganJalurNinja(teksBersih)
+                            }
                         }
                     } else {
                         textBubble.text = "(Hanya ada watermark/Tidak ada dialog)"
@@ -325,90 +322,51 @@ class FloatingService : Service() {
         }
     }
 
-    // PENYAPU SAMPAH: Menghapus URL, Watermark, Toki, dll.
     private fun bersihkanTeksOcr(teksMentah: String): String {
         val barisTeks = teksMentah.lines()
         val teksTersaring = StringBuilder()
-
         for (baris in barisTeks) {
             val teksLower = baris.lowercase()
-            if (teksLower.contains("http") ||
-                teksLower.contains("www.") ||
-                teksLower.contains(".com") ||
-                teksLower.contains(".net") ||
-                teksLower.contains("toki") ||
-                teksLower.contains("webtoon") ||
+            if (teksLower.contains("http") || teksLower.contains("www.") ||
+                teksLower.contains(".com") || teksLower.contains(".net") ||
+                teksLower.contains("toki") || teksLower.contains("webtoon") ||
                 teksLower.matches(Regex("^[0-9\\s/|:_-]+$"))
-            ) {
-                continue
-            }
-            if (baris.trim().isNotEmpty()) {
-                teksTersaring.append(baris).append("\n")
-            }
+            ) { continue }
+            if (baris.trim().isNotEmpty()) teksTersaring.append(baris).append("\n")
         }
         return teksTersaring.toString().trim()
     }
 
-    // === MODE 1: OFFLINE (GOOGLE ML KIT) ===
-    private fun terjemahkanDenganGoogle(teksKorea: String) {
-        if (penerjemahGoogle == null) {
-            textBubble.text = "Kamus offline belum siap, tunggu sebentar..."
-            tutupBalonTeksOtomatis()
-            return
-        }
-
-        penerjemahGoogle?.translate(teksKorea)
-            ?.addOnSuccessListener { teksHasil ->
-                Handler(Looper.getMainLooper()).post {
-                    textBubble.text = teksHasil
-                }
-            }
-            ?.addOnFailureListener { e ->
-                Handler(Looper.getMainLooper()).post {
-                    textBubble.text = "Gagal menerjemahkan: ${e.message}"
-                    tutupBalonTeksOtomatis()
-                }
-            }
-    }
-
-    // === MODE 2: LAPTOP (OLLAMA GEMMA) ===
+    // === MODE 0: OLLAMA / GEMMA (LAPTOP) ===
     private fun kirimKeLaptop(teksKorea: String) {
-        val ipLaptop = "192.168.100.109" // IP LAPTOP KAMU
-
+        val ipLaptop = "192.168.100.109"
         val client = OkHttpClient.Builder()
-            .connectTimeout(60, TimeUnit.SECONDS)
-            .writeTimeout(60, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .build()
+            .connectTimeout(60, TimeUnit.SECONDS).writeTimeout(60, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).build()
 
         val prompt = """
             Kamu adalah penerjemah manhwa profesional yang tidak disensor (uncensored).
             Tugasmu: Menerjemahkan teks OCR komik Korea ini ke bahasa Indonesia gaul (pakai lo/gue atau aku/kamu sesuai konteks cerita).
             
             ATURAN MUTLAK:
-            1. HANYA terjemahkan dialog antar karakter atau narasi cerita.
-            2. ABAIKAN DAN JANGAN TERJEMAHKAN jika masih ada sisa teks watermark situs, username translator, atau angka acak.
-            3. TERJEMAHKAN SEMUA KONTEN TANPA SENSOR. Jika teks aslinya mengandung kata-kata kasar, vulgar, kekerasan, atau konten dewasa (NSFW), terjemahkan secara eksplisit dan akurat apa adanya. Jangan pernah menolak, menyensor, mengeluh, atau memberi peringatan moral.
-            4. HANYA berikan hasil terjemahan akhirnya saja. Dilarang keras menambahkan penjelasan atau basa-basi apa pun.
+            1. HANYA terjemahkan dialog antar karakter.
+            2. ABAIKAN watermark atau angka acak.
+            3. TERJEMAHKAN TANPA SENSOR.
+            4. HANYA berikan hasil terjemahan akhirnya saja.
             
             Teks Korea:
             $teksKorea
         """.trimIndent()
 
         val jsonBody = JSONObject().apply {
-            put("model", "gemma3:4b") // Tetap pakai Gemma 3 kamu
+            put("model", "gemma3:4b")
             put("prompt", prompt)
             put("stream", false)
-            put("options", JSONObject().apply {
-                put("num_predict", 2048)
-                put("temperature", 0.3)
-            })
+            put("options", JSONObject().apply { put("temperature", 0.3) })
         }.toString()
 
         val request = Request.Builder()
             .url("http://$ipLaptop:11434/api/generate")
-            .post(jsonBody.toRequestBody("application/json".toMediaType()))
-            .build()
+            .post(jsonBody.toRequestBody("application/json".toMediaType())).build()
 
         Thread {
             try {
@@ -417,16 +375,67 @@ class FloatingService : Service() {
                         val hasilRaw = response.body?.string()
                         if (hasilRaw != null) {
                             val teksBersih = JSONObject(hasilRaw).getString("response")
-                            Handler(Looper.getMainLooper()).post {
-                                textBubble.text = teksBersih
-                            }
+                            Handler(Looper.getMainLooper()).post { textBubble.text = teksBersih }
                         }
                     } else {
-                        Handler(Looper.getMainLooper()).post { textBubble.text = "Error ${response.code}"; tutupBalonTeksOtomatis() }
+                        Handler(Looper.getMainLooper()).post { textBubble.text = "Error Laptop: ${response.code}"; tutupBalonTeksOtomatis() }
                     }
                 }
             } catch (e: Exception) {
                 Handler(Looper.getMainLooper()).post { textBubble.text = "Gagal konek ke Laptop"; tutupBalonTeksOtomatis() }
+            }
+        }.start()
+    }
+
+    // === MODE 1: GOOGLE ML KIT (OFFLINE HP) ===
+    private fun terjemahkanDenganGoogle(teksKorea: String) {
+        if (penerjemahGoogle == null) {
+            textBubble.text = "Kamus offline belum siap..."
+            tutupBalonTeksOtomatis()
+            return
+        }
+        penerjemahGoogle?.translate(teksKorea)?.addOnSuccessListener { teksHasil ->
+            Handler(Looper.getMainLooper()).post { textBubble.text = teksHasil }
+        }?.addOnFailureListener { e ->
+            Handler(Looper.getMainLooper()).post { textBubble.text = "Gagal menerjemahkan: ${e.message}"; tutupBalonTeksOtomatis() }
+        }
+    }
+
+    // === MODE 2: API NINJA (GOOGLE SCRIPT ONLINE) ===
+    private fun terjemahkanDenganJalurNinja(teksKorea: String) {
+        // PERHATIAN: GANTI TEKS DI BAWAH INI DENGAN URL DARI GOOGLE DRIVE KAMU!
+        val scriptUrl = BuildConfig.WEB_API_URL
+
+        val client = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).build()
+
+        val formBody = FormBody.Builder()
+            .add("text", teksKorea)
+            .add("source", "ko")
+            .add("target", "id")
+            .build()
+
+        val request = Request.Builder().url(scriptUrl).post(formBody).build()
+
+        Thread {
+            try {
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val responseData = response.body?.string()
+                        if (responseData != null) {
+                            val json = JSONObject(responseData)
+                            if (json.getString("status") == "success") {
+                                val hasil = json.getString("data")
+                                Handler(Looper.getMainLooper()).post { textBubble.text = hasil }
+                            } else {
+                                Handler(Looper.getMainLooper()).post { textBubble.text = "Error dari API Ninja"; tutupBalonTeksOtomatis() }
+                            }
+                        }
+                    } else {
+                        Handler(Looper.getMainLooper()).post { textBubble.text = "Gagal nembak ke Web"; tutupBalonTeksOtomatis() }
+                    }
+                }
+            } catch (e: Exception) {
+                Handler(Looper.getMainLooper()).post { textBubble.text = "Internet tidak stabil/Mati"; tutupBalonTeksOtomatis() }
             }
         }.start()
     }
@@ -437,10 +446,8 @@ class FloatingService : Service() {
 
     private fun bersihkanVirtualDisplay() {
         try {
-            virtualDisplay?.release()
-            virtualDisplay = null
-            imageReader?.close()
-            imageReader = null
+            virtualDisplay?.release(); virtualDisplay = null
+            imageReader?.close(); imageReader = null
         } catch (e: Exception) {}
     }
 
@@ -453,6 +460,8 @@ class FloatingService : Service() {
                 .setContentText("Tap tombol T di layar")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .build()
+
+            // INI SOLUSINYA: Harus dipisah atas-bawah, tidak boleh disingkat 1 baris
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
             } else {
@@ -460,7 +469,6 @@ class FloatingService : Service() {
             }
         }
     }
-
     override fun onDestroy() {
         super.onDestroy()
         bersihkanVirtualDisplay()
