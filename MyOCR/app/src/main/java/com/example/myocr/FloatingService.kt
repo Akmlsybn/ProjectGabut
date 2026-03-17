@@ -45,17 +45,11 @@ class FloatingService : Service() {
     private lateinit var textBubble: TextView
 
     private var mediaProjection: MediaProjection? = null
-
-    // ===================================================================
-    // KUNCI PERBAIKAN: VirtualDisplay & ImageReader dibuat SEKALI SAJA
-    // dan TIDAK PERNAH di-release sampai service mati.
-    // ===================================================================
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private var screenWidth = 0
     private var screenHeight = 0
 
-    // Flag untuk mencegah dobel proses jepretan
     private var isSedangMemproses = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -70,9 +64,7 @@ class FloatingService : Service() {
         buatNotifikasiForeground()
 
         try {
-            val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED)
-                ?: Activity.RESULT_CANCELED
-
+            val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
             val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent?.getParcelableExtra("DATA", Intent::class.java)
             } else {
@@ -84,37 +76,24 @@ class FloatingService : Service() {
                 val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 mediaProjection = mpm.getMediaProjection(resultCode, data)
 
-                // Daftarkan callback — wajib untuk Android 14+
                 mediaProjection?.registerCallback(object : MediaProjection.Callback() {
                     override fun onStop() {
                         super.onStop()
-                        Log.w("MY_OCR_LOG", "MediaProjection di-stop oleh sistem!")
                         mediaProjection = null
-                        // Bersihkan VirtualDisplay jika proyeksi dihentikan paksa
                         bersihkanVirtualDisplay()
                     }
                 }, Handler(Looper.getMainLooper()))
 
-                // Ambil ukuran layar & siapkan VirtualDisplay SEKALI di sini
                 inisialisasiVirtualDisplay()
-
                 Toast.makeText(this, "Penerjemah Siap! Tap T untuk terjemahkan.", Toast.LENGTH_SHORT).show()
-
-            } else {
-                Toast.makeText(this, "Izin rekam layar ditolak!", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
-            Log.e("MY_OCR_LOG", "Gagal inisiasi: ${e.message}")
             Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
         }
 
         return START_NOT_STICKY
     }
 
-    /**
-     * Dibuat SATU KALI saat service start.
-     * VirtualDisplay ini akan terus hidup selama service hidup.
-     */
     @SuppressLint("WrongConstant")
     private fun inisialisasiVirtualDisplay() {
         val metrics = DisplayMetrics()
@@ -123,7 +102,6 @@ class FloatingService : Service() {
         screenHeight = metrics.heightPixels
         val density = metrics.densityDpi
 
-        // ImageReader dengan maxImages = 2 (buffer aman)
         imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
 
         virtualDisplay = mediaProjection?.createVirtualDisplay(
@@ -133,27 +111,24 @@ class FloatingService : Service() {
             imageReader?.surface,
             null, null
         )
-
-        Log.d("MY_OCR_LOG", "VirtualDisplay siap: ${screenWidth}x${screenHeight}")
     }
 
     @SuppressLint("SetTextI18n")
     private fun buatUIMelayang() {
-        // --- TOMBOL MELAYANG ---
         floatingButton = Button(this).apply {
             text = "T"
             setBackgroundColor(android.graphics.Color.parseColor("#FF6200EE"))
             setTextColor(android.graphics.Color.WHITE)
+
+            // 1. KLIK BIASA = Untuk merekam & menerjemahkan
             setOnClickListener {
-                if (!isSedangMemproses) {
-                    mulaiProsesTerjemahan()
-                } else {
-                    Toast.makeText(this@FloatingService, "Tunggu, sedang memproses...", Toast.LENGTH_SHORT).show()
-                }
+                if (!isSedangMemproses) mulaiProsesTerjemahan()
             }
+
+            // 2. TAHAN (LONG PRESS) = Untuk mematikan aplikasi & menghilangkan tombol
             setOnLongClickListener {
-                Toast.makeText(this@FloatingService, "Penerjemah dimatikan!", Toast.LENGTH_SHORT).show()
-                stopSelf()
+                Toast.makeText(context, "Penerjemah Dimatikan. Sampai Jumpa!", Toast.LENGTH_SHORT).show()
+                stopSelf() // Ini perintah mutlak untuk membunuh Service-nya
                 true
             }
         }
@@ -161,10 +136,7 @@ class FloatingService : Service() {
         val btnParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                WindowManager.LayoutParams.TYPE_PHONE,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -174,7 +146,6 @@ class FloatingService : Service() {
         }
         windowManager.addView(floatingButton, btnParams)
 
-        // --- BALON TEKS ---
         textBubble = TextView(this).apply {
             text = "Menerjemahkan..."
             setBackgroundColor(android.graphics.Color.parseColor("#CC000000"))
@@ -188,129 +159,75 @@ class FloatingService : Service() {
         val textParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                WindowManager.LayoutParams.TYPE_PHONE,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.BOTTOM
-        }
+        ).apply { gravity = Gravity.BOTTOM }
         windowManager.addView(textBubble, textParams)
     }
 
     private fun mulaiProsesTerjemahan() {
-        if (mediaProjection == null || virtualDisplay == null || imageReader == null) {
-            munculkanPesanDiLayar("Izin rekam layar hilang! Aktifkan ulang dari aplikasi.")
-            return
-        }
-
+        if (mediaProjection == null || virtualDisplay == null || imageReader == null) return
         isSedangMemproses = true
-
-        // Sembunyikan UI agar tidak ikut terfoto
         floatingButton.visibility = View.GONE
         textBubble.visibility = View.GONE
-
-        // Tunggu UI benar-benar hilang dari layar
-        Handler(Looper.getMainLooper()).postDelayed({
-            jepretLayar()
-        }, 300)
+        Handler(Looper.getMainLooper()).postDelayed({ jepretLayar() }, 300)
     }
 
     private fun jepretLayar() {
-        // Timeout: jika dalam 3 detik tidak ada gambar, batalkan
-        val timeoutRunnable = Runnable {
-            if (isSedangMemproses) {
-                Log.w("MY_OCR_LOG", "Timeout saat menunggu gambar")
-                selesaiMemproses()
-                munculkanPesanDiLayar("Gagal memfoto layar (Timeout). Coba lagi!")
-            }
-        }
         val handler = Handler(Looper.getMainLooper())
+        val timeoutRunnable = Runnable { if (isSedangMemproses) selesaiMemproses() }
         handler.postDelayed(timeoutRunnable, 3000)
 
-        // ===================================================================
-        // KUNCI PERBAIKAN: Kita TIDAK membuat ImageReader baru.
-        // Kita cukup AMBIL gambar dari ImageReader yang sudah ada.
-        // ===================================================================
         try {
-            // Coba ambil gambar yang sudah ada di buffer
             val image = imageReader?.acquireLatestImage()
-
             if (image != null) {
                 handler.removeCallbacks(timeoutRunnable)
-                Log.d("MY_OCR_LOG", "Gambar berhasil diambil dari buffer!")
+                val planes = image.planes
+                val buffer: ByteBuffer = planes[0].buffer
+                val pixelStride = planes[0].pixelStride
+                val rowStride = planes[0].rowStride
+                val bitmapWidth = screenWidth + (rowStride - pixelStride * screenWidth) / pixelStride
+                val bitmap = Bitmap.createBitmap(bitmapWidth, screenHeight, Bitmap.Config.ARGB_8888)
+                bitmap.copyPixelsFromBuffer(buffer)
+                val finalBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
+                bitmap.recycle()
+                image.close()
 
-                try {
-                    val planes = image.planes
-                    val buffer: ByteBuffer = planes[0].buffer
-                    val pixelStride = planes[0].pixelStride
-                    val rowStride = planes[0].rowStride
-                    val rowPadding = rowStride - pixelStride * screenWidth
-
-                    val bitmapWidth = screenWidth + rowPadding / pixelStride
-                    val bitmap = Bitmap.createBitmap(bitmapWidth, screenHeight, Bitmap.Config.ARGB_8888)
-                    bitmap.copyPixelsFromBuffer(buffer)
-
-                    val finalBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
-                    bitmap.recycle()
-
-                    image.close() // Wajib! Biar slot buffer kosong lagi
-
-                    Handler(Looper.getMainLooper()).post {
-                        selesaiMemproses()
-                        textBubble.text = "Sedang membaca teks Korea..."
-                        textBubble.visibility = View.VISIBLE
-                        bacaTeksDariBitmap(finalBitmap)
-                    }
-                } catch (e: Exception) {
-                    image.close()
-                    handler.removeCallbacks(timeoutRunnable)
+                Handler(Looper.getMainLooper()).post {
                     selesaiMemproses()
-                    munculkanPesanDiLayar("Gagal proses gambar: ${e.message}")
+                    textBubble.text = "Sedang membaca teks..."
+                    textBubble.visibility = View.VISIBLE
+                    bacaTeksDariBitmap(finalBitmap)
                 }
             } else {
-                // Buffer kosong — tunggu sebentar lalu coba lagi SEKALI
-                Log.w("MY_OCR_LOG", "Buffer kosong, retry dalam 200ms...")
                 Handler(Looper.getMainLooper()).postDelayed({
                     handler.removeCallbacks(timeoutRunnable)
                     val retryImage = imageReader?.acquireLatestImage()
                     if (retryImage != null) {
-                        handler.removeCallbacks(timeoutRunnable)
-                        try {
-                            val planes = retryImage.planes
-                            val buffer: ByteBuffer = planes[0].buffer
-                            val pixelStride = planes[0].pixelStride
-                            val rowStride = planes[0].rowStride
-                            val rowPadding = rowStride - pixelStride * screenWidth
-                            val bitmapWidth = screenWidth + rowPadding / pixelStride
-                            val bitmap = Bitmap.createBitmap(bitmapWidth, screenHeight, Bitmap.Config.ARGB_8888)
-                            bitmap.copyPixelsFromBuffer(buffer)
-                            val finalBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
-                            bitmap.recycle()
-                            retryImage.close()
+                        val planes = retryImage.planes
+                        val buffer: ByteBuffer = planes[0].buffer
+                        val pixelStride = planes[0].pixelStride
+                        val rowStride = planes[0].rowStride
+                        val bitmapWidth = screenWidth + (rowStride - pixelStride * screenWidth) / pixelStride
+                        val bitmap = Bitmap.createBitmap(bitmapWidth, screenHeight, Bitmap.Config.ARGB_8888)
+                        bitmap.copyPixelsFromBuffer(buffer)
+                        val finalBitmap = Bitmap.createBitmap(bitmap, 0, 0, screenWidth, screenHeight)
+                        bitmap.recycle()
+                        retryImage.close()
 
-                            selesaiMemproses()
-                            textBubble.text = "Sedang membaca teks Korea..."
-                            textBubble.visibility = View.VISIBLE
-                            bacaTeksDariBitmap(finalBitmap)
-                        } catch (e: Exception) {
-                            retryImage.close()
-                            selesaiMemproses()
-                            munculkanPesanDiLayar("Gagal retry: ${e.message}")
-                        }
+                        selesaiMemproses()
+                        textBubble.text = "Sedang membaca teks..."
+                        textBubble.visibility = View.VISIBLE
+                        bacaTeksDariBitmap(finalBitmap)
                     } else {
                         selesaiMemproses()
-                        munculkanPesanDiLayar("Buffer layar kosong. Coba tap T lagi!")
                     }
                 }, 200)
             }
         } catch (e: Exception) {
-            Log.e("MY_OCR_LOG", "Error jepret: ${e.message}")
             handler.removeCallbacks(timeoutRunnable)
             selesaiMemproses()
-            munculkanPesanDiLayar("Error kamera: ${e.message}")
         }
     }
 
@@ -319,16 +236,7 @@ class FloatingService : Service() {
         floatingButton.visibility = View.VISIBLE
     }
 
-    private fun munculkanPesanDiLayar(pesan: String) {
-        Handler(Looper.getMainLooper()).post {
-            selesaiMemproses()
-            textBubble.text = pesan
-            textBubble.visibility = View.VISIBLE
-            tutupBalonTeksOtomatis()
-        }
-    }
-
-    // === MATA: GOOGLE ML KIT ===
+    // === MATA: GOOGLE ML KIT DENGAN FILTER SAMPAH ===
     private fun bacaTeksDariBitmap(bitmap: Bitmap) {
         try {
             val inputImage = InputImage.fromBitmap(bitmap, 0)
@@ -337,28 +245,55 @@ class FloatingService : Service() {
             recognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
                     bitmap.recycle()
-                    if (visionText.text.isNotBlank()) {
+                    // Bersihkan teks sebelum dikirim!
+                    val teksBersih = bersihkanTeksOcr(visionText.text)
+
+                    if (teksBersih.isNotBlank()) {
                         textBubble.text = "Menerjemahkan dengan AI..."
-                        kirimKeLaptop(visionText.text)
+                        kirimKeLaptop(teksBersih)
                     } else {
-                        textBubble.text = "(Tidak ada teks Korea yang terdeteksi)"
+                        textBubble.text = "(Hanya ada watermark/Tidak ada dialog)"
                         tutupBalonTeksOtomatis()
                     }
                 }
                 .addOnFailureListener { e ->
                     bitmap.recycle()
-                    textBubble.text = "Gagal membaca teks: ${e.message}"
+                    textBubble.text = "Gagal membaca teks"
                     tutupBalonTeksOtomatis()
                 }
         } catch (e: Exception) {
             bitmap.recycle()
-            munculkanPesanDiLayar("OCR Error: ${e.message}")
         }
     }
 
-    // === OTAK: OLLAMA DI LAPTOP ===
+    // PENYAPU SAMPAH: Menghapus URL, Watermark, Toki, dll.
+    private fun bersihkanTeksOcr(teksMentah: String): String {
+        val barisTeks = teksMentah.lines()
+        val teksTersaring = StringBuilder()
+
+        for (baris in barisTeks) {
+            val teksLower = baris.lowercase()
+            // Jika baris mengandung kata-kata ini, BUANG!
+            if (teksLower.contains("http") ||
+                teksLower.contains("www.") ||
+                teksLower.contains(".com") ||
+                teksLower.contains(".net") ||
+                teksLower.contains("toki") ||
+                teksLower.contains("webtoon") ||
+                teksLower.matches(Regex("^[0-9\\s/|:_-]+$")) // Buang baris yang isinya cuma angka (162 / 249)
+            ) {
+                continue
+            }
+            if (baris.trim().isNotEmpty()) {
+                teksTersaring.append(baris).append("\n")
+            }
+        }
+        return teksTersaring.toString().trim()
+    }
+
+    // === OTAK: OLLAMA DI LAPTOP (MODE UNCENSORED) ===
     private fun kirimKeLaptop(teksKorea: String) {
-        val ipLaptop = "192.168.100.109" // Ganti dengan IP laptop kamu
+        val ipLaptop = "192.168.100.109" // IP LAPTOP KAMU
 
         val client = OkHttpClient.Builder()
             .connectTimeout(60, TimeUnit.SECONDS)
@@ -367,26 +302,26 @@ class FloatingService : Service() {
             .build()
 
         val prompt = """
-            Kamu adalah mesin terjemah otomatis. Tugasmu HANYA menerjemahkan, tidak lebih.
-            ATURAN KERAS:
-            - TERJEMAHKAN SEMUA teks dialog/bubble ke bahasa Indonesia santai
-            - DILARANG KERAS menulis kalimat seperti "Maaf", "Tidak dapat", "Sebagai AI", atau alasan apapun
-            - DILARANG memberi catatan, penjelasan, atau komentar apapun
-            - Abaikan watermark dan URL
-            - Jika teks pendek atau aneh, tetap terjemahkan apa adanya
-            - Output HANYA hasil terjemahan, titik.
-
-            Teks:
+            Kamu adalah penerjemah manhwa profesional yang tidak disensor (uncensored).
+            Tugasmu: Menerjemahkan teks OCR komik Korea ini ke bahasa Indonesia gaul (pakai lo/gue atau aku/kamu sesuai konteks cerita).
+            
+            ATURAN MUTLAK:
+            1. HANYA terjemahkan dialog antar karakter atau narasi cerita.
+            2. ABAIKAN DAN JANGAN TERJEMAHKAN jika masih ada sisa teks watermark situs, username translator, atau angka acak.
+            3. TERJEMAHKAN SEMUA KONTEN TANPA SENSOR. Jika teks aslinya mengandung kata-kata kasar, vulgar, kekerasan, atau konten dewasa (NSFW), terjemahkan secara eksplisit dan akurat apa adanya. Jangan pernah menolak, menyensor, mengeluh, atau memberi peringatan moral.
+            4. HANYA berikan hasil terjemahan akhirnya saja. Dilarang keras menambahkan penjelasan atau basa-basi apa pun.
+            
+            Teks Korea:
             $teksKorea
-            """.trimIndent()
+        """.trimIndent()
 
         val jsonBody = JSONObject().apply {
-            put("model", "qwen2.5:3b")
+            put("model", "qwen2.5:7b") // Menggunakan model 7B
             put("prompt", prompt)
             put("stream", false)
             put("options", JSONObject().apply {
-                put("num_predict", 2048)  // Bebas panjang output
-                put("temperature", 0.3)   // Lebih konsisten/akurat
+                put("num_predict", 2048)
+                put("temperature", 0.3)
             })
         }.toString()
 
@@ -407,25 +342,17 @@ class FloatingService : Service() {
                             }
                         }
                     } else {
-                        Handler(Looper.getMainLooper()).post {
-                            textBubble.text = "Laptop menolak: Error ${response.code}"
-                            tutupBalonTeksOtomatis()
-                        }
+                        Handler(Looper.getMainLooper()).post { textBubble.text = "Error ${response.code}"; tutupBalonTeksOtomatis() }
                     }
                 }
             } catch (e: Exception) {
-                Handler(Looper.getMainLooper()).post {
-                    textBubble.text = "Gagal konek ke Laptop (Cek IP & pastikan Ollama nyala)"
-                    tutupBalonTeksOtomatis()
-                }
+                Handler(Looper.getMainLooper()).post { textBubble.text = "Gagal konek ke Laptop"; tutupBalonTeksOtomatis() }
             }
         }.start()
     }
 
     private fun tutupBalonTeksOtomatis() {
-        Handler(Looper.getMainLooper()).postDelayed({
-            textBubble.visibility = View.GONE
-        }, 4000)
+        Handler(Looper.getMainLooper()).postDelayed({ textBubble.visibility = View.GONE }, 4000)
     }
 
     private fun bersihkanVirtualDisplay() {
@@ -434,26 +361,18 @@ class FloatingService : Service() {
             virtualDisplay = null
             imageReader?.close()
             imageReader = null
-        } catch (e: Exception) {
-            Log.e("MY_OCR_LOG", "Error cleanup: ${e.message}")
-        }
+        } catch (e: Exception) {}
     }
 
     private fun buatNotifikasiForeground() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                "MANHWA_CHANNEL",
-                "Manhwa Translator",
-                NotificationManager.IMPORTANCE_LOW
-            )
+            val channel = NotificationChannel("MANHWA_CHANNEL", "Translator", NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-
             val notification = NotificationCompat.Builder(this, "MANHWA_CHANNEL")
                 .setContentTitle("Translator Aktif")
-                .setContentText("Tap tombol T di layar untuk menerjemahkan")
+                .setContentText("Tap tombol T di layar")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .build()
-
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
             } else {
@@ -466,9 +385,7 @@ class FloatingService : Service() {
         super.onDestroy()
         bersihkanVirtualDisplay()
         mediaProjection?.stop()
-        mediaProjection = null
         if (::floatingButton.isInitialized) windowManager.removeView(floatingButton)
         if (::textBubble.isInitialized) windowManager.removeView(textBubble)
-        Log.d("MY_OCR_LOG", "FloatingService destroyed, semua resource dibersihkan.")
     }
 }
