@@ -25,9 +25,15 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.Translator
+import com.google.mlkit.nl.translate.TranslatorOptions
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
@@ -41,7 +47,7 @@ import java.util.concurrent.TimeUnit
 class FloatingService : Service() {
 
     private lateinit var windowManager: WindowManager
-    private lateinit var floatingButton: Button
+    private lateinit var floatingLayout: LinearLayout
     private lateinit var textBubble: TextView
 
     private var mediaProjection: MediaProjection? = null
@@ -52,12 +58,17 @@ class FloatingService : Service() {
 
     private var isSedangMemproses = false
 
+    // --- FITUR DUAL MODE ---
+    private var isModeOffline = false // false = Ollama (Gemma), true = Google (Offline)
+    private var penerjemahGoogle: Translator? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         buatUIMelayang()
+        siapkanPenerjemahGoogle() // Siapkan kamus offline di background
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -94,6 +105,20 @@ class FloatingService : Service() {
         return START_NOT_STICKY
     }
 
+    private fun siapkanPenerjemahGoogle() {
+        val options = TranslatorOptions.Builder()
+            .setSourceLanguage(TranslateLanguage.KOREAN)
+            .setTargetLanguage(TranslateLanguage.INDONESIAN)
+            .build()
+
+        penerjemahGoogle = Translation.getClient(options)
+        val conditions = DownloadConditions.Builder().build()
+
+        penerjemahGoogle?.downloadModelIfNeeded(conditions)?.addOnSuccessListener {
+            Log.d("Translator", "Kamus offline siap digunakan")
+        }
+    }
+
     @SuppressLint("WrongConstant")
     private fun inisialisasiVirtualDisplay() {
         val metrics = DisplayMetrics()
@@ -115,23 +140,51 @@ class FloatingService : Service() {
 
     @SuppressLint("SetTextI18n")
     private fun buatUIMelayang() {
-        floatingButton = Button(this).apply {
+        // Kontainer agar tombol bisa atas-bawah
+        floatingLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        // 1. TOMBOL "T" (ATAS)
+        val floatingButton = Button(this).apply {
             text = "T"
             setBackgroundColor(android.graphics.Color.parseColor("#FF6200EE"))
             setTextColor(android.graphics.Color.WHITE)
 
-            // 1. KLIK BIASA = Untuk merekam & menerjemahkan
+            // Klik Biasa = Menerjemahkan
             setOnClickListener {
                 if (!isSedangMemproses) mulaiProsesTerjemahan()
             }
 
-            // 2. TAHAN (LONG PRESS) = Untuk mematikan aplikasi & menghilangkan tombol
+            // Tahan (Long Press) = Mematikan aplikasi
             setOnLongClickListener {
                 Toast.makeText(context, "Penerjemah Dimatikan. Sampai Jumpa!", Toast.LENGTH_SHORT).show()
-                stopSelf() // Ini perintah mutlak untuk membunuh Service-nya
+                stopSelf()
                 true
             }
         }
+
+        // 2. TOMBOL GANTI MODE (BAWAH)
+        val modeButton = Button(this).apply {
+            text = "AI" // Default pakai laptop
+            setBackgroundColor(android.graphics.Color.parseColor("#03DAC5"))
+            setTextColor(android.graphics.Color.BLACK)
+            textSize = 10f
+
+            setOnClickListener {
+                isModeOffline = !isModeOffline
+                if (isModeOffline) {
+                    text = "OFF"
+                    Toast.makeText(context, "Mode: Offline (Google ML Kit)", Toast.LENGTH_SHORT).show()
+                } else {
+                    text = "AI"
+                    Toast.makeText(context, "Mode: Laptop (Gemma AI)", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        floatingLayout.addView(floatingButton)
+        floatingLayout.addView(modeButton)
 
         val btnParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -144,7 +197,7 @@ class FloatingService : Service() {
             x = 0
             y = 300
         }
-        windowManager.addView(floatingButton, btnParams)
+        windowManager.addView(floatingLayout, btnParams)
 
         textBubble = TextView(this).apply {
             text = "Menerjemahkan..."
@@ -169,7 +222,7 @@ class FloatingService : Service() {
     private fun mulaiProsesTerjemahan() {
         if (mediaProjection == null || virtualDisplay == null || imageReader == null) return
         isSedangMemproses = true
-        floatingButton.visibility = View.GONE
+        floatingLayout.visibility = View.GONE
         textBubble.visibility = View.GONE
         Handler(Looper.getMainLooper()).postDelayed({ jepretLayar() }, 300)
     }
@@ -233,7 +286,7 @@ class FloatingService : Service() {
 
     private fun selesaiMemproses() {
         isSedangMemproses = false
-        floatingButton.visibility = View.VISIBLE
+        floatingLayout.visibility = View.VISIBLE
     }
 
     // === MATA: GOOGLE ML KIT DENGAN FILTER SAMPAH ===
@@ -249,8 +302,14 @@ class FloatingService : Service() {
                     val teksBersih = bersihkanTeksOcr(visionText.text)
 
                     if (teksBersih.isNotBlank()) {
-                        textBubble.text = "Menerjemahkan dengan AI..."
-                        kirimKeLaptop(teksBersih)
+                        // CEK MODE SAAT INI
+                        if (isModeOffline) {
+                            textBubble.text = "Menerjemahkan Offline..."
+                            terjemahkanDenganGoogle(teksBersih)
+                        } else {
+                            textBubble.text = "Menerjemahkan dengan AI..."
+                            kirimKeLaptop(teksBersih)
+                        }
                     } else {
                         textBubble.text = "(Hanya ada watermark/Tidak ada dialog)"
                         tutupBalonTeksOtomatis()
@@ -273,14 +332,13 @@ class FloatingService : Service() {
 
         for (baris in barisTeks) {
             val teksLower = baris.lowercase()
-            // Jika baris mengandung kata-kata ini, BUANG!
             if (teksLower.contains("http") ||
                 teksLower.contains("www.") ||
                 teksLower.contains(".com") ||
                 teksLower.contains(".net") ||
                 teksLower.contains("toki") ||
                 teksLower.contains("webtoon") ||
-                teksLower.matches(Regex("^[0-9\\s/|:_-]+$")) // Buang baris yang isinya cuma angka (162 / 249)
+                teksLower.matches(Regex("^[0-9\\s/|:_-]+$"))
             ) {
                 continue
             }
@@ -291,7 +349,29 @@ class FloatingService : Service() {
         return teksTersaring.toString().trim()
     }
 
-    // === OTAK: OLLAMA DI LAPTOP (MODE UNCENSORED) ===
+    // === MODE 1: OFFLINE (GOOGLE ML KIT) ===
+    private fun terjemahkanDenganGoogle(teksKorea: String) {
+        if (penerjemahGoogle == null) {
+            textBubble.text = "Kamus offline belum siap, tunggu sebentar..."
+            tutupBalonTeksOtomatis()
+            return
+        }
+
+        penerjemahGoogle?.translate(teksKorea)
+            ?.addOnSuccessListener { teksHasil ->
+                Handler(Looper.getMainLooper()).post {
+                    textBubble.text = teksHasil
+                }
+            }
+            ?.addOnFailureListener { e ->
+                Handler(Looper.getMainLooper()).post {
+                    textBubble.text = "Gagal menerjemahkan: ${e.message}"
+                    tutupBalonTeksOtomatis()
+                }
+            }
+    }
+
+    // === MODE 2: LAPTOP (OLLAMA GEMMA) ===
     private fun kirimKeLaptop(teksKorea: String) {
         val ipLaptop = "192.168.100.109" // IP LAPTOP KAMU
 
@@ -316,7 +396,7 @@ class FloatingService : Service() {
         """.trimIndent()
 
         val jsonBody = JSONObject().apply {
-            put("model", "qwen2.5:7b") // Menggunakan model 7B
+            put("model", "gemma3:4b") // Tetap pakai Gemma 3 kamu
             put("prompt", prompt)
             put("stream", false)
             put("options", JSONObject().apply {
@@ -385,7 +465,7 @@ class FloatingService : Service() {
         super.onDestroy()
         bersihkanVirtualDisplay()
         mediaProjection?.stop()
-        if (::floatingButton.isInitialized) windowManager.removeView(floatingButton)
+        if (::floatingLayout.isInitialized) windowManager.removeView(floatingLayout)
         if (::textBubble.isInitialized) windowManager.removeView(textBubble)
     }
 }

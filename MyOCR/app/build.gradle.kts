@@ -56,5 +56,6 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
+    implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.mlkit:text-recognition-korean:16.0.1")
 }
